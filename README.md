@@ -1,10 +1,17 @@
 # 21a AV2 Estudo
 
+> Conforme prometido estou liberando um estudo para a AV2 (https://github.com/insper-classroom/21a-emb-av2-simulado), ficou um pouco longo... por isso estou chamando de Estudo e não simulado.
+
 Trabalhando com:
 
 - RTOS
 - LVGL
 - UART (protocolo)
+
+Notem que na avaliação podemos pedir:
+
+- TC/ RTT/ RTC
+- ADC
 
 ## Descrição
 
