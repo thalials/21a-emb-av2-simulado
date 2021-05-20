@@ -37,12 +37,9 @@ Realizar a integração entre os dois firmwares (sugerimos `demo-comunicação` 
 
 - [ ] Crie uma tela que moste que a compra foi cancelada, se receber uma informação de cancelada da comunicação com a maquininha.
 
-### Extras
-
 - [ ] Troque os três semáforos dos botões (xSemaphoreOk, xSemaphorePago) por uma única fila.
 
 - [ ] Adicionar botão de cancelar na tela de `Configuração Açucar`
-
 
 - [ ] Adicionar timeour na tela `Configuração Açucar` (se usuário não digitar nada por 10s volta para tela inical)
 
