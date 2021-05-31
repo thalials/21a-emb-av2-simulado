@@ -4,7 +4,7 @@ import time
 import logging
 import threading
 
-
+# COMANDO PARA RODAR O PROGRAMA: py maquininha.py COM3 -b 115200
 class SerialControllerInterface:
     def __init__(self, port, baudrate):
         self.ser = serial.Serial(port, baudrate=baudrate)
@@ -63,21 +63,27 @@ class SerialControllerInterface:
                 self.send(self.OK)
             elif package['command'] == b'\x01':
                 if self.status == 'Input' or self.status == 'Pago':
+                    # self.FAIL = b'\x00'
                     self.send(self.FAIL)
                 else:
                     self.valor = package['data']
                     self.status = 'Input'
+                    # self.OK = b'\xFF'
                     self.send(self.OK)
             elif package['command'] == b'\x02':
                 if self.status == 'Input':
+                    # self.WAITING = b'\x01'
                     self.send(self.WAITING)
                 elif self.status == 'Pago':
                     self.status = ''
+                    # self.OK = b'\xFF'
                     self.send(self.OK)
                 elif self.status == 'Cancelado':
                     self.status = ''
+                    # self.CANCELED = b'\x02'
                     self.send(self.CANCELED)
                 else:
+                    # self.FAIL = b'\x00'
                     self.send(self.FAIL)
 
             self.incoming = self.ser.read()

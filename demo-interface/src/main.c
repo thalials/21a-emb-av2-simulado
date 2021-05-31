@@ -22,6 +22,15 @@ static lv_disp_buf_t disp_buf;
 static lv_color_t buf_1[LV_HOR_RES_MAX * LV_VER_RES_MAX];
 
 /************************************************************************/
+/* DEFINES                                                              */
+/************************************************************************/
+
+#define LED_PIO				PIOC
+#define LED_PIO_ID			ID_PIOC
+#define LED_PIO_IDX			8
+#define LED_PIO_IDX_MASK	(1 << LED_PIO_IDX)
+
+/************************************************************************/
 /* RTOS                                                                 */
 /************************************************************************/
 
@@ -30,6 +39,9 @@ static lv_color_t buf_1[LV_HOR_RES_MAX * LV_VER_RES_MAX];
 
 #define TASK_APS2_STACK_SIZE                (1024*6/sizeof(portSTACK_TYPE))
 #define TASK_APS2_STACK_PRIORITY            (tskIDLE_PRIORITY)
+
+#define TASK_RTC_STACK_SIZE			 (1024*6/sizeof(portSTACK_TYPE))
+#define TASK_RTC_STACK_PRIORITY		 (tskIDLE_PRIORITY)
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,  signed char *pcTaskName);
 extern void vApplicationIdleHook(void);
@@ -60,6 +72,10 @@ void lv_page_1_inicial(void);
 void lv_page_2_configurando(void);
 void lv_page_3_pagamento(void);
 void lv_page_4_preparando(void);
+void lv_page_maquininha(void);
+void led_toggle(void);
+void led_init(void);
+/*static void task_rtc(void *pvParameters);*/
 
 /************************************************************************/
 /* globas                                                                */
@@ -67,6 +83,7 @@ void lv_page_4_preparando(void);
 
 QueueHandle_t xQueueRx;
 QueueHandle_t xQueueProduto;
+SemaphoreHandle_t xSemaphore;
 SemaphoreHandle_t xSemaphoreOk;
 SemaphoreHandle_t xSemaphorePago;
 
@@ -75,7 +92,28 @@ lv_obj_t * labelDebug;
 lv_obj_t * bar_regulagem;
 lv_obj_t * label_aguardando;
 lv_obj_t * label_valor_regulagem;
+static lv_obj_t * label_valor_timer;
+lv_obj_t * label_valor;
+volatile char pagamento[] = {'U', 1, 5, 'X'};
+volatile int cancelar;
+volatile int flag_rtc = 1;
+volatile int contador = 10;
+volatile int troca_tela;
+volatile int recebido;
+/************************************************************************/
+/* STRUCTS                                                              */
+/************************************************************************/
+typedef struct  {
+	uint32_t year;
+	uint32_t month;
+	uint32_t day;
+	uint32_t week;
+	uint32_t hour;
+	uint32_t minute;
+	uint32_t second;
+} calendar;
 
+calendar currentTime; 
 /************************************************************************/
 /* handlers                                                             */
 /************************************************************************/
@@ -93,6 +131,67 @@ void USART1_Handler(void){
     // -  Transmissoa finalizada
     } else if(ret & US_IER_TXRDY){
   }
+}
+
+/************************************************************************/
+/* LED                                                                  */
+/************************************************************************/
+
+void led_init(void) {
+	pmc_enable_periph_clk(LED_PIO_ID);
+	pio_set_output(LED_PIO, LED_PIO_IDX_MASK, 0, 0, 0);
+	pio_set(LED_PIO, LED_PIO_IDX_MASK);
+}
+
+void led_toggle(void) {
+	if (pio_get_output_data_status(LED_PIO, LED_PIO_IDX_MASK)) {
+		pio_clear(LED_PIO, LED_PIO_IDX_MASK);
+		} else {
+		pio_set(LED_PIO, LED_PIO_IDX_MASK);
+	}
+}
+
+/************************************************************************/
+/* RTC                                                                */
+/************************************************************************/
+void RTC_init(Rtc *rtc, uint32_t id_rtc, calendar t, uint32_t irq_type){
+	/* Configura o PMC */
+	pmc_enable_periph_clk(ID_RTC);
+
+	/* Default RTC configuration, 24-hour mode */
+	rtc_set_hour_mode(rtc, 0);
+
+	/* Configura data e hora manualmente */
+	rtc_set_date(rtc, t.year, t.month, t.day, t.week);
+	rtc_set_time(rtc, t.hour, t.minute, t.second);
+
+	/* Configure RTC interrupts */
+	NVIC_DisableIRQ(id_rtc);
+	NVIC_ClearPendingIRQ(id_rtc);
+	NVIC_SetPriority(id_rtc, 4);
+	NVIC_EnableIRQ(id_rtc);
+
+	/* Ativa interrupcao via alarme */
+	rtc_enable_interrupt(rtc,  irq_type);
+}
+
+void RTC_Handler(void) {
+	uint32_t ul_status = rtc_get_status(RTC);
+	/* seccond tick */
+	if ((ul_status & RTC_SR_SEC) == RTC_SR_SEC) {
+// 		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+// 		xSemaphoreGiveFromISR(xSemaphore, &xHigherPriorityTaskWoken);
+	}
+	/* Time or date alarm */
+	if ((ul_status & RTC_SR_ALARM) == RTC_SR_ALARM) {
+		flag_rtc = 1;
+	}
+	rtc_clear_status(RTC, RTC_SCCR_SECCLR);
+	rtc_clear_status(RTC, RTC_SCCR_ALRCLR);
+	rtc_clear_status(RTC, RTC_SCCR_ACKCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TIMCLR);
+	rtc_clear_status(RTC, RTC_SCCR_CALCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TDERRCLR);
 }
 
 /************************************************************************/
@@ -123,80 +222,132 @@ static void task_receive(void *pvParameters) {
     }
     
     if (p_do == 1) {
-      lv_label_set_text_fmt(labelDebug, "%02X %02X %02X %02X",p_data[0], p_data[1], p_data[2], p_data[3] );
+      lv_label_set_text_fmt(labelDebug, "%02X %02X %02X %02X",p_data[0], p_data[1], p_data[2], p_data[3]);
       p_cnt = 0;
       p_do = 0;
+	  recebido = 1;
     }
-
+	// if 0x50 0x22 0x02 0x58 -> cancelado
   }
 }
 
 static void task_main(void *pvParameters) {
-  xSemaphoreOk = xSemaphoreCreateBinary();
-  if (xSemaphoreOk == NULL) printf("Falha em criar o semaforo \n");
+	xSemaphore = xSemaphoreCreateBinary();
+	if (xSemaphore == NULL) printf("Falha em criar o semaforo \n");
+		
+	xSemaphoreOk = xSemaphoreCreateBinary();
+	if (xSemaphoreOk == NULL) printf("Falha em criar o semaforo \n");
 
-  xSemaphorePago = xSemaphoreCreateBinary();
-  if (xSemaphorePago == NULL) printf("Falha em criar o semaforo \n");
-  
-  xQueueProduto = xQueueCreate(32, sizeof(int));
+	xSemaphorePago = xSemaphoreCreateBinary();
+	if (xSemaphorePago == NULL) printf("Falha em criar o semaforo \n");
+	
+	xQueueProduto = xQueueCreate(32, sizeof(int));
 
-  int produto_id = 0;
-  int produto_acucar = 0;
-
-  enum states {EXIBE_TELA1, INICIAL, EXIBE_TELA2, CONFIGURANDO, EXIBE_TELA3, PAGAMENTO, EXIBE_TELA4, PREPARANDO, CANCELADO} state;
-  for (;;)  {
+	int produto_id = 0;
+	int produto_acucar = 0;
+	
+	enum states {EXIBE_TELA1, INICIAL, EXIBE_TELA_MAQUININHA, ANALISANDO, EXIBE_TELA2, CONFIGURANDO, EXIBE_TELA3, PAGAMENTO, EXIBE_TELA4, PREPARANDO, CANCELADO, EXIBE_CANCELADO} state;
+	for (;;)  {
     
-    switch (state)
-    {
-      case EXIBE_TELA1:
-      lv_page_1_inicial();
-      state = INICIAL;
-      
-      case INICIAL:
-      if( xQueueReceive(xQueueProduto, &produto_id, 1000 ) ){
-        state = EXIBE_TELA2;
-      }
-      break;
-      
-      case EXIBE_TELA2:
-      lv_page_2_configurando();
-      state = CONFIGURANDO;
-      break;
+	switch (state){
+	case EXIBE_TELA1:
+	lv_page_1_inicial();
+	state = INICIAL;
 
-      case CONFIGURANDO:
-      if( xSemaphoreTake(xSemaphoreOk, 1000) ){
-        produto_acucar = lv_bar_get_value(bar_regulagem);
-        state = EXIBE_TELA3;
-      }
-      break;
+	case INICIAL:
+	if( xQueueReceive(xQueueProduto, &produto_id, 1000 ) ){
+	//	state = EXIBE_TELA2;
+		state = EXIBE_TELA_MAQUININHA;
+	} 
+	break;
+	
+	case EXIBE_TELA_MAQUININHA:
+	lv_page_maquininha();
+	//state = ANALISANDO;
+	
+// 	case ANALISANDO:
+// 	if(recebido == 1) {
+// 		printf("entrou em recebido\n");
+// 	}
+	// 	if (recebido == waiting) {
+	//
+	// 	}
+	// 	if (recebido == cancelado){
+	// 		state = CANCELADO;
+	// 	}
+	// 	break; 
+	
+	case EXIBE_TELA2:
+	lv_page_2_configurando();
+	state = CONFIGURANDO;
+	break;
+
+	case CONFIGURANDO:
+	if( xSemaphoreTake(xSemaphoreOk, 1000) ){
+		//send_package(p, 4);
+		produto_acucar = lv_bar_get_value(bar_regulagem);
+		state = EXIBE_TELA3;
+	}	
+	if (flag_rtc) {
+		contador--;
+		lv_label_set_text_fmt(label_valor_timer, "%02d s", contador);
+		if (contador == 0) {
+			troca_tela = 1;
+			contador = 10;
+		}
+	}  	
+	if (cancelar) {
+		cancelar = 0;
+		state = EXIBE_TELA1;
+	}
+	if (troca_tela) {
+		troca_tela = 0;
+		state = EXIBE_TELA1;
+	}
+	break;
       
-      case EXIBE_TELA3:
-      lv_page_3_pagamento();
-      state = PAGAMENTO;
-      break;
+	case EXIBE_TELA3:
+	lv_page_3_pagamento();
+	lv_label_set_text_fmt(label_valor, "R$ %d ", pagamento[2]);
+	vTaskDelay(4000);
+	state = PAGAMENTO;
+	break;
       
-      case PAGAMENTO:
-      //       if( xSemaphoreTake(xSemaphorePago, 1000) ){
-      //         state = EXIBE_TELA4;
-      //       }
-      vTaskDelay(4000);
-      state = EXIBE_TELA4;
-      break;
+	case PAGAMENTO:
+	//       if( xSemaphoreTake(xSemaphorePago, 1000) ){
+	//         state = EXIBE_TELA4;
+	//       }
+	vTaskDelay(4000);
+	state = EXIBE_TELA4;
+	break;
       
-      case EXIBE_TELA4:
-      lv_page_4_preparando();
-      state = PREPARANDO;
-      break;
+	case EXIBE_TELA4:
+	lv_page_4_preparando();
+	state = PREPARANDO;
+	break;
       
-      case PREPARANDO:
-      vTaskDelay(1000);
-      state = EXIBE_TELA1;
-      break;
+	case PREPARANDO:
+	vTaskDelay(1000);
+	state = EXIBE_TELA1;
+	break;
+	
+ 	case CANCELADO:
+	//       if( xSemaphoreTake(xSemaphoreCancelado, 1000) ){
+	//         state = EXIBE_CANCELADO;
+	//       }
+	vTaskDelay(4000);
+	state = EXIBE_CANCELADO;
+	break;
+	
+	case EXIBE_CANCELADO:
+	//lv_page_cancelada();
+	state = EXIBE_TELA1;
+	break;
       
-      default:
-      state = INICIAL;
-      break;
-    }
+	default:
+	state = INICIAL;
+	break;
+	}
     
   }
 }
@@ -205,10 +356,29 @@ static void task_main(void *pvParameters) {
 /* lvgl                                                                 */
 /************************************************************************/
 
+static void but_check(lv_obj_t * obj, lv_event_t event) {
+	char p[] = {'U', 0, 0, 'X'};
+	if(event == LV_EVENT_CLICKED)
+	send_package(p, 4);
+}
+
+static void but_cobrar(lv_obj_t * obj, lv_event_t event) {
+	char p[] = {'U', 1, 20, 'X'};
+	if(event == LV_EVENT_CLICKED)
+	send_package(p, 4);
+}
+
+static void but_verifica(lv_obj_t * obj, lv_event_t event) {
+	char p[] = {'U', 2, 0, 'X'};
+	if(event == LV_EVENT_CLICKED)
+	send_package(p, 4);
+}
+
 static void handler_btn_expresso_1(lv_obj_t * obj, lv_event_t event) {
   if(event == LV_EVENT_CLICKED) {
     int produto = 1;
     xQueueSend(xQueueProduto, &produto, 1000);
+	xSemaphoreGive(xSemaphore);
   }
 }
 
@@ -216,6 +386,7 @@ static void handler_btn_longo_1(lv_obj_t * obj, lv_event_t event) {
   if(event == LV_EVENT_CLICKED) {
     int produto = 2;
     xQueueSend(xQueueProduto, &produto, 1000);
+	xSemaphoreGive(xSemaphore);
   }
 }
 
@@ -223,6 +394,7 @@ static void handler_btn_curto_1(lv_obj_t * obj, lv_event_t event) {
   if(event == LV_EVENT_CLICKED) {
     int produto = 3;
     xQueueSend(xQueueProduto, &produto, 1000);
+	xSemaphoreGive(xSemaphore);
   }
 }
 
@@ -230,13 +402,22 @@ static void handler_btn_pingado_1(lv_obj_t * obj, lv_event_t event) {
   if(event == LV_EVENT_CLICKED) {
     int produto = 4;
     xQueueSend(xQueueProduto, &produto, 1000);
+	xSemaphoreGive(xSemaphore);
   }
 }
 
 static void handler_btn_ok_1(lv_obj_t * obj, lv_event_t event) {
-  if(event == LV_EVENT_CLICKED) {
-    xSemaphoreGive(xSemaphoreOk);
-  }
+	char p[] = {'U', 1, 12, 'X'};
+	if(event == LV_EVENT_CLICKED) {
+		send_package(pagamento, 4);
+		xSemaphoreGive(xSemaphoreOk);
+	}
+}
+
+static void handler_btn_cancelar(lv_obj_t * obj, lv_event_t event) {
+	if(event == LV_EVENT_CLICKED) {
+		cancelar = 1;
+	}
 }
 
 static void handler_btn_plus_2(lv_obj_t * obj, lv_event_t event) {
@@ -261,8 +442,7 @@ static void handler_btn_minus_2(lv_obj_t * obj, lv_event_t event) {
   }
 }
 
-void lv_page_1_inicial(void)
-{
+void lv_page_1_inicial(void){
   /*Cria uma pagina*/
   lv_obj_t * page_1 = lv_page_create(lv_scr_act(), NULL);
   lv_obj_set_size(page_1, 320, 240);
@@ -308,81 +488,121 @@ void lv_page_1_inicial(void)
   lv_label_set_text(label_btn_pingado, "Pingado");
 }
 
-void lv_page_2_configurando  (void)
-{
-  /*Cria uma pagina*/
-  lv_obj_t * page_2 = lv_page_create(lv_scr_act(), NULL);
-  lv_obj_set_size(page_2, 320, 240);
-  lv_obj_align(page_2, NULL, LV_ALIGN_IN_TOP_LEFT, 0, 0);
-  
-  lv_obj_t * label_regulagem;
-  label_regulagem = lv_label_create(lv_scr_act(), NULL);
-  lv_obj_align(label_regulagem, NULL, LV_ALIGN_CENTER, -90 , -90);
-  lv_obj_set_style_local_text_font(label_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_20);
-  lv_obj_set_style_local_text_color(label_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
-  lv_label_set_text_fmt(label_regulagem, "Regulagem de Acucar");
-  
-  lv_obj_t * btn_Plus = lv_btn_create(lv_scr_act(), NULL);
-  lv_obj_set_event_cb(btn_Plus, handler_btn_plus_2);
-  lv_obj_set_width(btn_Plus, 40);  lv_obj_set_height(btn_Plus, 40);
-  lv_obj_align(btn_Plus, NULL, LV_ALIGN_CENTER, 120 , 0);
-  lv_obj_t * label_btn_Plus;
-  label_btn_Plus = lv_label_create(btn_Plus, NULL);
-  lv_label_set_recolor(label_btn_Plus, true);
-  lv_label_set_text(label_btn_Plus, LV_SYMBOL_PLUS);
-  
-  lv_obj_t * btn_minus = lv_btn_create(lv_scr_act(), NULL);
-  lv_obj_set_event_cb(btn_minus, handler_btn_minus_2);
-  lv_obj_set_width(btn_minus, 40);  lv_obj_set_height(btn_minus, 40);
-  lv_obj_align(btn_minus, NULL, LV_ALIGN_CENTER, -120 , 0);
-  lv_obj_t * label_btn_minus;
-  label_btn_minus = lv_label_create(btn_minus, NULL);
-  lv_label_set_recolor(label_btn_minus, true);
-  lv_label_set_text(label_btn_minus, LV_SYMBOL_MINUS);
+void lv_page_maquininha(void) {
+	/*Cria uma pagina*/
+	lv_obj_t * page_maquininha = lv_page_create(lv_scr_act(), NULL);
+	lv_obj_set_size(page_maquininha, 320, 240);
+	lv_obj_align(page_maquininha, NULL, LV_ALIGN_IN_TOP_LEFT, 0, 0);
+	
+	lv_obj_t * label;
+	lv_obj_t * btn1 = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(btn1, but_check);
+	lv_obj_align(btn1, NULL, LV_ALIGN_IN_TOP_LEFT, 0, 0);
+	label = lv_label_create(btn1, NULL);
+	lv_label_set_text(label, "Check");
 
-  bar_regulagem = lv_bar_create(lv_scr_act(), NULL);
-  lv_obj_set_size(bar_regulagem, 175, 20);
-  lv_bar_set_range(bar_regulagem, 0, 4);
-  lv_obj_align(bar_regulagem, NULL, LV_ALIGN_CENTER, 0, 0);
-
-  label_valor_regulagem = lv_label_create(lv_scr_act(), NULL);
-  lv_obj_align(label_valor_regulagem, NULL, LV_ALIGN_CENTER, 5 , 20);
-  lv_obj_set_style_local_text_font(label_valor_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_14);
-  lv_obj_set_style_local_text_color(label_valor_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
-  lv_label_set_text_fmt(label_valor_regulagem, "0");
-  
-  lv_obj_t * btn_ok = lv_btn_create(lv_scr_act(), NULL);
-  lv_obj_set_event_cb(btn_ok, handler_btn_ok_1);
-  lv_obj_set_width(btn_ok, 120);  lv_obj_set_height(btn_ok, 40);
-  lv_obj_align(btn_ok, NULL, LV_ALIGN_CENTER, 0, 60);
-  lv_obj_t * label_btn_ok;
-  label_btn_ok = lv_label_create(btn_ok, NULL);
-  lv_label_set_text(label_btn_ok, "OK");
+	lv_obj_t * btn2 = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(btn2, but_cobrar);
+	lv_obj_align(btn2, btn1, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+	label = lv_label_create(btn2, NULL);
+	lv_label_set_text(label, "Cobrar");
+	
+	lv_obj_t * btn3 = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(btn3, but_verifica);
+	lv_obj_align(btn3, btn2, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+	label = lv_label_create(btn3, NULL);
+	lv_label_set_text(label, "Verifica");
+	
+	labelDebug = lv_label_create(lv_scr_act(), NULL);
+	lv_obj_set_width(labelDebug, 150);
+	lv_obj_align(labelDebug, NULL, LV_ALIGN_IN_BOTTOM_MID, 0, -30);	
 }
 
-void lv_page_3_pagamento(void)
-{
+void lv_page_2_configurando(void){
+	/*Cria uma pagina*/
+	lv_obj_t * page_2 = lv_page_create(lv_scr_act(), NULL);
+	lv_obj_set_size(page_2, 320, 240);
+	lv_obj_align(page_2, NULL, LV_ALIGN_IN_TOP_LEFT, 0, 0);
+	
+	label_valor_timer = lv_label_create(lv_scr_act(), NULL);
+	lv_obj_align(label_valor_timer, NULL, LV_ALIGN_CENTER, 5 , -25);
+	lv_obj_set_style_local_text_font(label_valor_timer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_14);
+	lv_obj_set_style_local_text_color(label_valor_timer, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_RED);
+	lv_label_set_text_fmt(label_valor_timer, "%02d s", 10);
+	
+	lv_obj_t * label_regulagem;
+	label_regulagem = lv_label_create(lv_scr_act(), NULL);
+	lv_obj_align(label_regulagem, NULL, LV_ALIGN_CENTER, -90 , -90);
+	lv_obj_set_style_local_text_font(label_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_20);
+	lv_obj_set_style_local_text_color(label_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+	lv_label_set_text_fmt(label_regulagem, "Regulagem de Acucar");
+	
+	lv_obj_t * btn_Plus = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(btn_Plus, handler_btn_plus_2);
+	lv_obj_set_width(btn_Plus, 40);  lv_obj_set_height(btn_Plus, 40);
+	lv_obj_align(btn_Plus, NULL, LV_ALIGN_CENTER, 120 , 0);
+	lv_obj_t * label_btn_Plus;
+	label_btn_Plus = lv_label_create(btn_Plus, NULL);
+	lv_label_set_recolor(label_btn_Plus, true);
+	lv_label_set_text(label_btn_Plus, LV_SYMBOL_PLUS);
+	
+	lv_obj_t * btn_minus = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(btn_minus, handler_btn_minus_2);
+	lv_obj_set_width(btn_minus, 40);  lv_obj_set_height(btn_minus, 40);
+	lv_obj_align(btn_minus, NULL, LV_ALIGN_CENTER, -120 , 0);
+	lv_obj_t * label_btn_minus;
+	label_btn_minus = lv_label_create(btn_minus, NULL);
+	lv_label_set_recolor(label_btn_minus, true);
+	lv_label_set_text(label_btn_minus, LV_SYMBOL_MINUS);
+
+	bar_regulagem = lv_bar_create(lv_scr_act(), NULL);
+	lv_obj_set_size(bar_regulagem, 175, 20);
+	lv_bar_set_range(bar_regulagem, 0, 4);
+	lv_obj_align(bar_regulagem, NULL, LV_ALIGN_CENTER, 0, 0);
+
+	label_valor_regulagem = lv_label_create(lv_scr_act(), NULL);
+	lv_obj_align(label_valor_regulagem, NULL, LV_ALIGN_CENTER, 5 , 20);
+	lv_obj_set_style_local_text_font(label_valor_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_14);
+	lv_obj_set_style_local_text_color(label_valor_regulagem, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+	lv_label_set_text_fmt(label_valor_regulagem, "0");
+	
+	lv_obj_t * btn_ok = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(btn_ok, handler_btn_ok_1);
+	lv_obj_set_width(btn_ok, 100);  lv_obj_set_height(btn_ok, 40);
+	lv_obj_align(btn_ok, NULL, LV_ALIGN_CENTER, 60, 60);
+	lv_obj_t * label_btn_ok;
+	label_btn_ok = lv_label_create(btn_ok, NULL);
+	lv_label_set_text(label_btn_ok, "OK");
+	
+	lv_obj_t * cancelar = lv_btn_create(lv_scr_act(), NULL);
+	lv_obj_set_event_cb(cancelar, handler_btn_cancelar);
+	lv_obj_set_width(cancelar, 100);  lv_obj_set_height(cancelar, 40);
+	lv_obj_align(cancelar, NULL, LV_ALIGN_CENTER , -60, 60);
+	lv_obj_t * label_btn_cancelar;
+	label_btn_cancelar = lv_label_create(cancelar, NULL);
+	lv_label_set_text(label_btn_cancelar, "CANCELAR");
+}
+
+void lv_page_3_pagamento(void) {
   /*Cria uma pagina*/
   lv_obj_t * page_3 = lv_page_create(lv_scr_act(), NULL);
   lv_obj_set_size(page_3, 320, 240);
   lv_obj_align(page_3, NULL, LV_ALIGN_IN_TOP_LEFT, 0, 0);
-  
-  lv_obj_t * label_valor;
+    
   label_valor = lv_label_create(lv_scr_act(), NULL);
   lv_obj_align(label_valor, NULL, LV_ALIGN_CENTER, -50 , -80);
   lv_obj_set_style_local_text_font(label_valor, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_40);
   lv_obj_set_style_local_text_color(label_valor, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_RED);
-  lv_label_set_text_fmt(label_valor, "R$ 2,00");
+  lv_label_set_text_fmt(label_valor, "R% %s ", "---");
   
   label_aguardando = lv_label_create(lv_scr_act(), NULL);
   lv_obj_align(label_aguardando, NULL, LV_ALIGN_CENTER, -85 , 50);
   lv_obj_set_style_local_text_font(label_aguardando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_20);
   lv_obj_set_style_local_text_color(label_aguardando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
-  lv_label_set_text_fmt(label_aguardando, "Aguardando Valor");
+  lv_label_set_text_fmt(label_aguardando, "Aguardando pagar");
 }
 
-void lv_page_4_preparando(void)
-{
+void lv_page_4_preparando(void){
   /*Cria uma pagina*/
   lv_obj_t * page_4 = lv_page_create(lv_scr_act(), NULL);
   lv_obj_set_size(page_4, 320, 240);
@@ -400,6 +620,13 @@ void lv_page_4_preparando(void)
   lv_obj_align(img1, NULL, LV_ALIGN_CENTER, 0, -20);
 }
 
+// void lv_page_cancelada(void) {
+// 	 label_aguardando = lv_label_create(lv_scr_act(), NULL);
+// 	 lv_obj_align(label_aguardando, NULL, LV_ALIGN_CENTER, 0 , 0);
+// 	 lv_obj_set_style_local_text_font(label_aguardando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_20);
+// 	 lv_obj_set_style_local_text_color(label_aguardando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+// 	 lv_label_set_text_fmt(label_aguardando, "COMPRA CANCELADA");
+// }
 /************************************************************************/
 /* funcs                                                               */
 /************************************************************************/
@@ -511,53 +738,63 @@ bool my_input_read(lv_indev_drv_t * drv, lv_indev_data_t*data) {
 /************************************************************************/
 int main(void) {
   
-  xQueueRx = xQueueCreate(32, sizeof(char));
+	xQueueRx = xQueueCreate(32, sizeof(char));
   
-  /* board and sys init */
-  board_init();
-  sysclk_init();
-  USART1_init();
+	currentTime = (calendar) {2018, 3, 19, 12, 03, 04, 0};
 
-  /* LCd int */
-  configure_lcd();
-  ili9341_init();
-  configure_touch();
-  ili9341_backlight_on();
+	RTC_init(RTC, ID_RTC, currentTime, RTC_IER_ALREN);
   
-  /*LittlevGL init*/
-  lv_init();
-  lv_disp_drv_t disp_drv;                 /*A variable to hold the drivers. Can be local variable*/
-  lv_disp_drv_init(&disp_drv);            /*Basic initialization*/
-  lv_disp_buf_init(&disp_buf, buf_1, NULL, LV_HOR_RES_MAX * LV_VER_RES_MAX);  /*Initialize `disp_buf` with the buffer(s) */
-  disp_drv.buffer = &disp_buf;            /*Set an initialized buffer*/
-  disp_drv.flush_cb = my_flush_cb;        /*Set a flush callback to draw to the display*/
-  lv_disp_t * disp;
-  disp = lv_disp_drv_register(&disp_drv); /*Register the driver and save the created display objects*/
+	/* board and sys init */
+	board_init();
+	sysclk_init();
+	USART1_init();
+
+	/* LCd int */
+	configure_lcd();
+	ili9341_init();
+	configure_touch();
+	ili9341_backlight_on();
   
-  /* Init input on LVGL */
-  lv_indev_drv_t indev_drv;
-  lv_indev_drv_init(&indev_drv);      /*Basic initialization*/
-  indev_drv.type = LV_INDEV_TYPE_POINTER;
-  indev_drv.read_cb = my_input_read;
-  /*Register the driver in LVGL and save the created input device object*/
-  lv_indev_t * my_indev = lv_indev_drv_register(&indev_drv);
+	/*LittlevGL init*/
+	lv_init();
+	lv_disp_drv_t disp_drv;                 /*A variable to hold the drivers. Can be local variable*/
+	lv_disp_drv_init(&disp_drv);            /*Basic initialization*/
+	lv_disp_buf_init(&disp_buf, buf_1, NULL, LV_HOR_RES_MAX * LV_VER_RES_MAX);  /*Initialize `disp_buf` with the buffer(s) */
+	disp_drv.buffer = &disp_buf;            /*Set an initialized buffer*/
+	disp_drv.flush_cb = my_flush_cb;        /*Set a flush callback to draw to the display*/
+	lv_disp_t * disp;
+	disp = lv_disp_drv_register(&disp_drv); /*Register the driver and save the created display objects*/
+  
+	/* Init input on LVGL */
+	lv_indev_drv_t indev_drv;
+	lv_indev_drv_init(&indev_drv);      /*Basic initialization*/
+	indev_drv.type = LV_INDEV_TYPE_POINTER;
+	indev_drv.read_cb = my_input_read;
+	/*Register the driver in LVGL and save the created input device object*/
+	lv_indev_t * my_indev = lv_indev_drv_register(&indev_drv);
   
 
-  if (xTaskCreate(task_lcd, "LCD", TASK_LCD_STACK_SIZE, NULL, TASK_LCD_STACK_PRIORITY, NULL) != pdPASS) {
-    printf("Failed to create lcd task\r\n");
-  }
+	if (xTaskCreate(task_lcd, "LCD", TASK_LCD_STACK_SIZE, NULL, TASK_LCD_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create lcd task\r\n");
+	}
+	
+	if (xTaskCreate(task_main, "main", TASK_APS2_STACK_SIZE, NULL, TASK_APS2_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create Main task\r\n");
+	}
+	
+	if (xTaskCreate(task_receive, "receive", TASK_APS2_STACK_SIZE, NULL, TASK_APS2_STACK_PRIORITY, NULL) != pdPASS) {
+		printf("Failed to create Main task\r\n");
+	}
   
-  if (xTaskCreate(task_main, "main", TASK_APS2_STACK_SIZE, NULL, TASK_APS2_STACK_PRIORITY, NULL) != pdPASS) {
-    printf("Failed to create Main task\r\n");
-  }
+//   if (xTaskCreate(task_rtc, "RTC", TASK_RTC_STACK_SIZE, NULL, TASK_RTC_STACK_PRIORITY, NULL) != pdPASS) {
+// 	  printf("Failed to create rtc task\r\n");
+//   }
   
-  if (xTaskCreate(task_receive, "receive", TASK_APS2_STACK_SIZE, NULL, TASK_APS2_STACK_PRIORITY, NULL) != pdPASS) {
-    printf("Failed to create Main task\r\n");
-  }
   
-  /* Start the scheduler. */
-  vTaskStartScheduler();
+  
+	/* Start the scheduler. */
+	vTaskStartScheduler();
 
-  /* RTOS n?o deve chegar aqui !! */
-  while(1){ }
+	/* RTOS n?o deve chegar aqui !! */
+	while(1){ }
 }

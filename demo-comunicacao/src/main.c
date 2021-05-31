@@ -132,7 +132,7 @@ static void but_check(lv_obj_t * obj, lv_event_t event) {
 }
 
 static void but_cobrar(lv_obj_t * obj, lv_event_t event) {
-  char p[] = {'U', 1, 15, 'X'};
+  char p[] = {'U', 1, 20, 'X'};
   if(event == LV_EVENT_CLICKED)
   send_package(p, 4);
 }
