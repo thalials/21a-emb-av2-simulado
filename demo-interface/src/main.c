@@ -106,6 +106,7 @@ QueueHandle_t xQueueFeedback;
 lv_obj_t * labelDebug;
 lv_obj_t * bar_regulagem;
 lv_obj_t * label_aguardando;
+lv_obj_t * bar_preparando;
 lv_obj_t * label_valor_regulagem;
 lv_obj_t * label_valor;
 static lv_obj_t * label_valor_timer;
@@ -117,6 +118,8 @@ volatile int flag_rtc = 1;
 volatile int contador = 10;
 volatile int troca_tela;
 
+// PARA ANIMACAO 
+volatile int preparando = 1;
 /************************************************************************/
 /* RTC                                                                */
 /************************************************************************/
@@ -267,6 +270,7 @@ static void task_main(void *pvParameters) {
 			case EXIBE_TELA1:
 			lv_page_1_inicial();
 			pio_set(LED_PIO, LED_IDX_MASK);
+			preparando = 1;
 			send_package(handshake, 4);
 			if(xQueueReceive(xQueueFeedback, &feedback, 1000)){
 				if(feedback == 255){
@@ -296,12 +300,6 @@ static void task_main(void *pvParameters) {
 				if(feedback == 255){
 					xSemaphoreGive(xSemaphoreVerifica);
 				}
-// 				if(feedback == 2){
-// 					state = EXIBE_TELA5;
-// 				}
-// 				if(feedback == 0){
-// 					state = EXIBE_TELA1;
-// 				}
 			}
 			if( xSemaphoreTake(xSemaphoreVerifica, 1000) ){
 				state = EXIBE_TELA2;
@@ -375,6 +373,16 @@ static void task_main(void *pvParameters) {
 			break;
 			
 			case PREPARANDO:
+			while (preparando) {
+				uint16_t contador_cafe = lv_bar_get_value(bar_preparando);
+				if (contador_cafe < 4)
+				contador_cafe++;
+				lv_bar_set_value(bar_preparando, contador_cafe, LV_ANIM_OFF);
+				vTaskDelay(2000);
+				if (contador_cafe == 4) {
+					preparando = 0;
+				}
+			}
 			vTaskDelay(3000);
 			state = EXIBE_TELA1;
 			break;
@@ -414,9 +422,7 @@ static void but_cobrar(lv_obj_t * obj, lv_event_t event) {
 }
 
 static void but_verifica(lv_obj_t * obj, lv_event_t event) {
-	char p[] = {'U', 2, 0, 'X'};
 	if(event == LV_EVENT_CLICKED)
-	//send_package(p, 4);xSemaphoreVerifica
 	xSemaphoreGive(xSemaphoreVerifica);
 }
 
@@ -618,16 +624,22 @@ void lv_page_4_preparando(void) {
 	lv_obj_set_size(page_4, 320, 240);
 	lv_obj_align(page_4, NULL, LV_ALIGN_IN_TOP_LEFT, 0, 0);
 	
-	lv_obj_t * label_preparando;
-	label_preparando = lv_label_create(lv_scr_act(), NULL);
-	lv_obj_align(label_preparando, NULL, LV_ALIGN_CENTER, -85 , 50);
-	lv_obj_set_style_local_text_font(label_preparando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_20);
-	lv_obj_set_style_local_text_color(label_preparando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
-	lv_label_set_text_fmt(label_preparando, "Preparando Cafe");
-	
 	lv_obj_t * img1 = lv_img_create(lv_scr_act(), NULL);
 	lv_img_set_src(img1, &cafe_image);
 	lv_obj_align(img1, NULL, LV_ALIGN_CENTER, 0, -20);
+	
+	lv_obj_t * label_preparando;
+	label_preparando = lv_label_create(lv_scr_act(), NULL);
+	lv_obj_align(label_preparando, NULL, LV_ALIGN_CENTER, -85 , 30);
+	lv_obj_set_style_local_text_font(label_preparando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, &lv_font_montserrat_20);
+	lv_obj_set_style_local_text_color(label_preparando, LV_OBJ_PART_MAIN, LV_STATE_DEFAULT, LV_COLOR_BLACK);
+	lv_label_set_text_fmt(label_preparando, "Preparando cafe...");
+
+	// animacao preparando café
+	bar_preparando = lv_bar_create(lv_scr_act(), NULL);
+	lv_obj_set_size(bar_preparando, 175, 20);
+	lv_bar_set_range(bar_preparando, 0, 4);
+	lv_obj_align(bar_preparando, NULL, LV_ALIGN_CENTER, 0, 60);
 }
 
 void lv_page_canceled(void){
